@@ -5,36 +5,29 @@
 (require json)
 (require racket/system)
 
+(provide concat-tweets analyse-sentiments get-tweets-mood)
+
+;;Sample usage
+;;-------------------------
+;;(get-tweets-mood "/path/to/massmine/directory/massmine --task=twitter-search --query=* --geo=1.3707,32.3032,300km --count=100")
+
 
 ;;; This function reads line-oriented JSON (as output by massmine),
-;;; and packages it into an array. For very large data sets, loading
-;;; everything into memory like this is heavy handed. For data this small,
-;;; working in memory is simpler
-
-(provide joined-tweets sentiment-analysis analyse-tweets)
+;;; and packages it into an array.
 
 
-;; Read the tweets from the twurl request provided, the tweets are under the key 'results'
-
-(define (read-tweets-twurl twurl-request)
-  (let ([stringout (with-output-to-string (lambda ()(system twurl-request)))])
-    ;(hash-ref (with-input-from-string stringout (λ () (read-json))) 'results)
-    stringout
-    ))
-
-
-;; Extract the actual tweet text from each tweet
-;;; hash. Finally, remove retweets.
-
-(define (tweetlist twurl-request)
-  (define tweets (read-tweets-twurl twurl-request))
-  (let ([tmp (map (λ (x) (list  (hash-ref x 'text))) tweets)])
-    (filter (λ (x) (not (string-prefix? (first x) "RT"))) tmp)
-     ))
-
-;;; Helper function to normalize case, remove URLs, remove punctuation, and remove spaces
-;;; from each tweet. This function takes a list of words and returns a
-;;; preprocessed subset of words/tokens as a list
+(define (json-lines->json-array #:head [head #f])
+  (let loop ([num 0]
+             [json-array '()]
+             [record (read-json)])
+    (if (or (eof-object? record)
+            (and head (>= num head)))
+        (jsexpr->string json-array)
+        (loop (add1 num) (cons record json-array)
+              (read-json)))))
+;; Helper function to normalize case, remove URLs, remove punctuation, and remove spaces
+;; from each tweet. This function takes a list of words and returns a
+;; preprocessed subset of words/tokens as a list
 
 (define (clean-text x)
    
@@ -43,34 +36,55 @@
            (remove-urls
             (string-downcase x)))))
 
-;;tweetlist returns is a list of lists of strings. Tail recursion is used to extract each string and append
+;; Retrieve tweets using the massmine cmd input
+
+(define (fetch-tweets massmine-cmd)
+  (let ([stringout (with-output-to-string (lambda ()(system massmine-cmd)))])
+    (string->jsexpr (with-input-from-string stringout (λ () (json-lines->json-array))))
+    
+    ))
+
+
+;; Each tweet includes a lot of metadata. For this analysis we’ll keep only the text
+;; then discard retweets as well
+
+(define (tweetlist massmine-cmd)
+  (define tweets (fetch-tweets massmine-cmd))
+  (let ([tmp (map (λ (x) (list  (hash-ref x 'text))) tweets)])
+    (filter (λ (x) (not (string-prefix? (first x) "RT"))) tmp)
+     ))
+
+;; tweetlist returns is a list of lists of strings. Tail recursion is used to extract each string and append
 ;; it into one large string.
-(define (joined-tweets twurl-request)
+
+(define (concat-tweets massmine-cmd)
     (local[
            (define (joined1 tlist1 acc)
              (cond [(empty? tlist1) acc]
                    [else (joined1 (rest tlist1) (string-join (list acc "\n " (clean-text (first(first tlist1))))))]
                    )
              )
-           ](joined1 (tweetlist twurl-request) "")) )
+           ](joined1 (tweetlist massmine-cmd) "")) )
 
 
-;;; To begin our sentiment analysis, we extract each unique word
-;;; and the number of times it occurred in the document
+;; To analyse sentiments in our tweets, we extract each unique word
+;; and the number of times it occurred
 
-;;; Using the nrc lexicon, we can label each (non stop-word) with an
-;;; emotional label.
+;; Using the nrc lexicon, we can label each (non stop-word) with an
+;; emotional label.
 
-(define (sentiment-analysis tweet-text)
-  (let* ([words (document->tokens tweet-text #:sort? #t)]
+(define (analyse-sentiments tweets-text)
+  (let* ([words (document->tokens tweets-text #:sort? #t)]
         [sentiment (list->sentiment words #:lexicon 'nrc)])
-;;; sentiment, created above, consists of a list of triplets of the pattern
-;;; (token sentiment freq) for each token in the document. Many words will have 
-;;; the same sentiment label, so we aggregrate (by summing) across such tokens.     
+    
+;; sentiment, created above, consists of a list of triplets of the pattern
+;; (token sentiment freq) for each token in the document. Many words will have 
+;; the same sentiment label, so we aggregrate (by summing) across such tokens.
+    
   (display (take sentiment 5))
   (let ([counts (aggregate sum ($ sentiment 'sentiment) ($ sentiment 'freq))])
   (parameterize ((plot-width 800))
-;;; Better yet, we can visualize this result as a barplot (discrete-histogram)
+;;; We then visualize this result as a barplot (discrete-histogram)
     (plot (list
 	   (tick-grid)
 	   (discrete-histogram
@@ -82,18 +96,9 @@
  
  ))
 
-;;analyse-tweets is the overall abstraction that takes a valid twurl request as an
-;;argument to draw a histogram of sentiments
-(define (analyse-tweets twurl-request)
-  (let ([ff (joined-tweets twurl-request)])
-    ;(display ff)
-  (sentiment-analysis ff))
-  )
+;; All definitions are finally consolidated into one procedural abstraction called get-tweets-mood
+(define (get-tweets-mood massmine-cmd)
+  (let ([tweets-string (concat-tweets massmine-cmd)])
+  (analyse-sentiments tweets-string)))
 
 
-;;Example calls
-;;(analyse-tweets "/usr/local/bin/twurl /1.1/tweets/search/30day/dev.json?query=DailyMonitor search api&place_country=UK&fromDate=201710090000&toDate=201711090000")
-;;(analyse-tweets "/usr/local/bin/twurl /1.1/tweets/search/30day/dev.json?query=DailyMonitor search api&place_country=UK&fromDate=201710090000&toDate=201711090000")
-; (analyse-tweets "/usr/local/bin/twurl /1.1/tweets/search/30day/dev.json?query=15939084 search api&place_country=UK&fromDate=201710090000&toDate=201711090000")
-
-;"/usr/local/bin/twurl /1.1/tweets/search/30day/dev.json?query=realDonaldTrump search api&place_country=UK&fromDate=201710090000&toDate=201711090000"
